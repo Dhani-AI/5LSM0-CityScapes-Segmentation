@@ -18,7 +18,7 @@ git clone https:https://github.com/Dhani-AI/5LSM0-CityScapes-Segmentation.git
 
 After cloning the repository, navigate to the project directory:
 ```bash
-cd 5LSM0-CityScapes-Segmentation
+cd CityScapes-Segmentation-Challenge
 ```
 
 To run the code, you will need the following libraries:
