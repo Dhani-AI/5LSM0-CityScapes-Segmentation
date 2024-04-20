@@ -87,3 +87,13 @@ wandb login
 ```
 
 Also see the website for more information on how to setup [Weights & Biases](https://docs.wandb.ai/quickstart)
+
+## GPU Acceleration
+
+This project supports GPU acceleration using CUDA. To utilize GPU resources for training the model, make sure you have an NVIDIA GPU with CUDA support installed on your system.
+
+### Requirements
+
+- NVIDIA GPU with CUDA support
+- CUDA Toolkit installed (compatible with PyTorch version)
+- PyTorch with GPU support (`torch.cuda.is_available()` should return `True`)
