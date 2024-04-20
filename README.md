@@ -1,4 +1,4 @@
-# 5LSM0-CityScapes-Segmentation
+# CityScapes-Segmentation-Challenge
 
 - **Author:** Dhani Crapels
 - **Codalab Username:** Dhani
@@ -6,7 +6,7 @@
 - **TU/e Email Address:** d.r.m.crapels@student.tue.nl
 
 ## Overview
-This assignment is part of the 5LSM0 course taught at Eindhoven University of Technology (TU/e) in 2023-2024. It involves working with the Cityscapes dataset and training a neural network. This repository contains the code for semantic segmentation of cityscapes using a U-net model. The implementation is based on the [starting kit for the 5LSM0 final assignment](https://github.com/5LSM0/FinalAssignment) 
+This assignment is part of the Neural Networks for computer vision (5LSM0) course taught at Eindhoven University of Technology (TU/e) in 2023-2024. It involves working with the Cityscapes dataset and training a neural network. This repository contains the code for semantic segmentation of cityscapes using a U-net model. The implementation is based on the [starting kit for the 5LSM0 final assignment](https://github.com/5LSM0/FinalAssignment) 
 
 ## Getting Started
 
