@@ -13,7 +13,7 @@ This assignment is part of the Neural Networks for computer vision (5LSM0) cours
 ### Installing
 To get started with this project, you need to clone the repository to your local machine. You can do this by running the following command in your terminal:
 ```bash
-git clone https:https://github.com/Dhani-AI/5LSM0-CityScapes-Segmentation.git
+git clone https:https://github.com/Dhani-AI/CityScapes-Segmentation-Challenge.git
 ```
 
 After cloning the repository, navigate to the project directory:
