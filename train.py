@@ -2,31 +2,43 @@
 This file needs to contain the main training loop. The training code should be encapsulated in a main() function to
 avoid any global variables.
 """
-import numpy as np
-import os
+# Import python files
 import utils
 import process_data
-from torchmetrics.classification import MulticlassJaccardIndex, Dice
 from model import Model
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torchvision.datasets import Cityscapes
+
+# Import necessary libraries
+import numpy as np
+import os
+from tqdm import tqdm
 from argparse import ArgumentParser
 import matplotlib.pyplot as plt
-from torchvision import transforms
-from torch.utils.data import random_split, DataLoader
 import wandb
+
+import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR
+import torch.optim as optim
+from torchmetrics.functional.classification import (accuracy, dice,
+                                                    multiclass_jaccard_index)
+
+from torchvision.datasets import Cityscapes
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode, v2
+from torch.utils.data import DataLoader, random_split
 
 IMAGE_HEIGHT = 256  # Original image height 1024
 IMAGE_WIDTH = 512  # Original image width 2048
-NUM_EPOCHS = 25
-LEARNING_RATE = 0.0004
-BATCH_SIZE = 32
-IGNORE_INDEX = 255
+NUM_EPOCHS = 10
+LEARNING_RATE = 0.001
+BATCH_SIZE = 2
+SCHEDULER_STEPSIZE = 10
+SCHEDULER_GAMMA = 0.1
+WEIGHT_DECAY = 0.0001
+IGNORE_INDEX = 19
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NUM_WORKERS = 8
-NUM_CLASSES = 19
+NUM_CLASSES = 20
 
 CITYSCAPES_MEAN = [0.28689554, 0.32513303, 0.28389177]
 CITYSCAPES_STD = [0.18696375, 0.19017339, 0.18720214]
@@ -104,36 +116,25 @@ def visualize_result(original_image, annotation, predicted_annotation, filename)
     plt.close()
 
 
-def main(args):
-    """Main training loop for the CityScapes segmentation model"""
- 
-    # start a new wandb run
-    wandb.init(
-        project="CityScapes-Segmentation",  # change this to your project name
-        config={
-            "learning_rate": LEARNING_RATE,
-            "architecture": "UNet",
-            "dataset": "CityScapes",
-            "epochs": NUM_EPOCHS,
-        }
-    )
-
+def create_data_loaders(args, batch_size, image_height, image_width, mean, std, num_workers):
+    """Create the data loaders for the CityScapes dataset"""
     # Define transforms for both the image and its annotation
-    transform = transforms.Compose([
-        transforms.Resize((IMAGE_HEIGHT, IMAGE_WIDTH)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=CITYSCAPES_MEAN, std=CITYSCAPES_STD)
+    transform = v2.Compose([
+        v2.Resize((image_height, image_width)),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std)
     ])
 
-    annotation_transform = transforms.Compose([
-        transforms.Resize((IMAGE_HEIGHT, IMAGE_WIDTH)),
-        transforms.ToTensor()
+    annotation_transform = v2.Compose([
+        v2.Resize((image_height, image_width), interpolation=InterpolationMode.NEAREST),
+        v2.ToImage()
     ])
 
-    # data loading
+    # Load the dataset
     dataset = Cityscapes(args.data_path, split='train', mode='fine', target_type='semantic', transform=transform,
                          target_transform=annotation_transform)
-
+    
     # dataset[0]     //pair image mask
     # dataset[0][0]  //image  dim [3, 1024, 2048] (channels, height, width) type  torch.Tensor
     # dataset[0][1]  //mask   dim [1, 1024, 2048] (channels, height, width) type  torch.Tensor
@@ -147,8 +148,91 @@ def main(args):
                                               generator=torch.Generator().manual_seed(42))
 
     # DataLoader setup
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    return train_dataset, val_dataset, train_loader, val_loader
+
+
+def train_model(model, train_loader, criterion, optimizer, device):
+    model.train()
+    train_loss = 0.0
+    train_acc = 0.0
+    train_dice = 0.0
+    train_iou = 0.0
+
+    for images, targets in tqdm(train_loader):
+        images = images.to(device)
+        targets = targets.long().squeeze(dim=1)
+        targets = utils.map_id_to_train_id(targets)
+        targets[targets == 255] = 19
+        targets = targets.to(device)
+
+        optimizer.zero_grad()
+        predictions = model(images)
+        loss = criterion(predictions, targets)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.detach()
+        outputs_max = torch.argmax(predictions, dim=1)
+        
+        train_acc += accuracy(outputs_max, targets, task="multiclass", num_classes=NUM_CLASSES, ignore_index=IGNORE_INDEX).detach()
+        train_dice += dice(predictions, targets, ignore_index=IGNORE_INDEX).detach()
+        train_iou += multiclass_jaccard_index(predictions, targets, num_classes=NUM_CLASSES, ignore_index=IGNORE_INDEX).detach()
+    
+    num_batches = len(train_loader)
+    return (train_loss / num_batches).item(), (train_acc / num_batches).item(), (train_dice / num_batches).item(), (train_iou / num_batches).item()
+
+
+def validate_model(model, val_loader, criterion, device):
+    model.eval()
+    val_loss = 0.0
+    val_acc = 0.0
+    val_dice = 0.0
+    val_iou = 0.0
+
+    with torch.no_grad():
+        for images, targets in tqdm(val_loader):
+            images = images.to(device)
+            targets = (targets).long().squeeze(dim=1) 
+            targets = utils.map_id_to_train_id(targets)
+            targets[targets == 255] = 19
+            targets = targets.to(device)
+
+            predictions = model(images)
+            loss = criterion(predictions, targets)
+
+            val_loss += loss.detach()
+            outputs_max = torch.argmax(predictions, dim=1)
+            
+            val_acc += accuracy(outputs_max, targets, task="multiclass", num_classes=NUM_CLASSES, ignore_index=IGNORE_INDEX).detach()
+            val_dice += dice(predictions, targets, ignore_index=IGNORE_INDEX).detach()
+            val_iou += multiclass_jaccard_index(predictions, targets, num_classes=NUM_CLASSES, ignore_index=IGNORE_INDEX).detach()
+        
+    num_batches = len(val_loader)
+    return (val_loss / num_batches).item(), (val_acc / num_batches).item(), (val_dice / num_batches).item(), (val_iou / num_batches).item()
+
+def main(args):
+    """Main training loop for the CityScapes segmentation model"""
+ 
+    # start a new wandb run
+    wandb.init(
+        project="CityScapes-Segmentation",  # change this to your project name
+        config={
+            "learning_rate": LEARNING_RATE,
+            "batch_size": BATCH_SIZE,
+            "num_epochs": NUM_EPOCHS,
+            "num_workers": NUM_WORKERS,
+            "architecture": "UNet",
+            "dataset": "CityScapes",
+            "optimizer": "Adam",
+
+        }
+    )
+
+    # Get the data loaders
+    train_dataset, val_dataset, train_loader, val_loader = create_data_loaders(args, BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, CITYSCAPES_MEAN, CITYSCAPES_STD, NUM_WORKERS)
 
     # Accessing an example from the training and validation dataset
     train_img, train_semantic = train_dataset[0]
@@ -161,88 +245,52 @@ def main(args):
     # Model setup
     model = Model().to(DEVICE)
 
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
     # Loss function (ignore class index 255)
     criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
+    # Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY) 
+
+    # Define the learning rate scheduler
+    scheduler = StepLR(optimizer, step_size=SCHEDULER_STEPSIZE, gamma=SCHEDULER_GAMMA)
+
+    # Training loop
+    train_losses = []
+    val_losses = []
+    train_accs = []
+    val_accs = []
+    train_dices = []
+    val_dices = []
+    train_ious = []
+    val_ious = []
+
     # Training / Validation loop
     for epoch in range(NUM_EPOCHS):
-        model.train()
-        train_loss = 0.0
-        
-        train_jaccard = MulticlassJaccardIndex(num_classes=NUM_CLASSES, ignore_index=IGNORE_INDEX).to(DEVICE)
-        train_jaccard.reset()
-
-        for images, target in train_loader:
-            images = images.to(DEVICE)
-            target = (target*255).long().squeeze()  # because the id are normalized between 0-1
-            target = utils.map_id_to_train_id(target).to(DEVICE)
-
-            # Forward pass
-            predictions = model(images)
-            loss = criterion(predictions, target)  # compute loss
-
-            # Backward pass
-            optimizer.zero_grad()  # set the gradients to zero
-            loss.backward()
-            optimizer.step()  # update the weights
-
-            # Compute the loss
-            train_loss += loss.item()
-            
-            # Postprocess predictions to generate masks
-            masks_pred = process_data.postprocess(predictions, (IMAGE_HEIGHT, IMAGE_WIDTH))
-            
-            # Convert NumPy array to PyTorch tensor
-            masks_pred_tensor = torch.tensor(masks_pred, dtype=torch.long).to(DEVICE)
-            train_jaccard.update(masks_pred_tensor.flatten(), target.flatten())
-
-        # Calculate average training loss and dice coefficient
-        train_loss = train_loss / len(train_loader)
-        train_jaccard_score = train_jaccard.compute()
-
-        # Evaluation on the validation set
-        model.eval()
-        val_loss = 0.0
-        val_jaccard = MulticlassJaccardIndex(num_classes=NUM_CLASSES, ignore_index=255).to(DEVICE)
-        val_jaccard.reset()
-
-        with torch.inference_mode():
-            for images_val, target_val in val_loader:
-                images_val = images_val.to(DEVICE)
-                target_val = (target_val * 255).long().squeeze()  # Because IDs are normalized between 0-1
-                target_val = utils.map_id_to_train_id(target_val).to(DEVICE)
-
-                # Forward pass
-                predictions_val = model(images_val)
-                loss = criterion(predictions_val, target_val)
-
-                # Compute the loss
-                val_loss += loss.item()
-                
-                # Postprocess predictions to generate masks
-                masks_pred_val = process_data.postprocess(predictions_val, (IMAGE_HEIGHT, IMAGE_WIDTH))
-  
-                # Convert NumPy array to PyTorch tensor
-                masks_pred_tensor_val = torch.tensor(masks_pred_val, dtype=torch.long).to(DEVICE)
-                val_jaccard.update(masks_pred_tensor_val.flatten(), target_val.flatten())
-
-        # Calculate average validation loss
-        val_loss = val_loss / len(val_loader)
-        val_jaccard_score = val_jaccard.compute()
-
-        # Print the training and validation loss for each epoch
-        print(f"Epoch {epoch + 1}/{NUM_EPOCHS}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch+1}\n-------------------------------")
+        train_loss, train_acc, train_dice, train_iou = train_model(model, train_loader, criterion, optimizer, DEVICE)
+        val_loss, val_acc, val_dice, val_iou = validate_model(model, val_loader, criterion, DEVICE)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
+        train_dices.append(train_dice)
+        val_dices.append(val_dice)
+        train_ious.append(train_iou)
+        val_ious.append(val_iou)
 
         # Log metrics to wandb
         wandb.log({
             "train_loss": train_loss,
+            "train_acc": train_acc,
+            "train_dice": train_dice,
+            "train_lr": optimizer.param_groups[0]["lr"],
             "val_loss": val_loss,
-            "Train_Jaccard": train_jaccard_score,
-            "Val_Jaccard": val_jaccard_score,
+            "val_acc": val_acc,
+            "val_dice": val_dice,
+            "val_lr": optimizer.param_groups[0]["lr"]
         })
+
+        scheduler.step()
 
     wandb.finish()
 
@@ -258,13 +306,12 @@ def main(args):
     result_folder = "results"
     os.makedirs(result_folder, exist_ok=True)
 
-    
     with torch.inference_mode():
         for i, (image, annotation) in enumerate(val_loader):
               
             # Move data to device
             image = image.to(DEVICE)
-            annotation = (annotation * 255).long().squeeze()  # Because IDs are normalized between 0-1
+            annotation = (annotation).long().squeeze(dim=1)  # Because IDs are normalized between 0-1
             annotation = utils.map_id_to_train_id(annotation).to(DEVICE)
             
             # Forward pass
