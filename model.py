@@ -25,7 +25,7 @@ class Model(nn.Module):
         self.d4 = decoder_block(128, 64)
 
         """ Classifier """
-        self.outputs = nn.Conv2d(64, 19, kernel_size=1, padding=0)
+        self.outputs = nn.Conv2d(64, 20, kernel_size=1, padding=0)
 
     def forward(self, inputs):
         """ Encoder """
@@ -54,9 +54,11 @@ class conv_block(nn.Module):
         super().__init__()
 
         self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=3, padding=1)
+        nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
         self.bn1 = nn.BatchNorm2d(out_c)
 
         self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=3, padding=1)
+        nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
         self.bn2 = nn.BatchNorm2d(out_c)
 
         self.relu = nn.ReLU()
